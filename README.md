@@ -20,9 +20,10 @@ ticker;quantity
 
 For example:
 
-AAPL;5
-X:BTCUSD;0.5
-TSLA;10
+AAPL;5  
+BTCUSD;0.5  
+TSLA;10  
+
 
 ### 3. **Local Files**
 
