@@ -10,10 +10,14 @@ function readPortfolio($csvFile) {
     $portfolio = array();
     if (($handle = fopen($csvFile, "r")) !== FALSE) {
         while (($data = fgetcsv($handle, 1000, ";")) !== FALSE) {
-            // Assuming CSV structure is Ticker;Amount (e.g., AAPL;5)
-            $portfolio[] = array( 
-                'ticker' => $data[0],
-                'amount' => (int)$data[1]
+            // Skip blank or malformed lines
+            if (count($data) < 2 || trim($data[0]) === '') {
+                continue;
+            }
+            // Assuming CSV structure is Ticker;Amount (e.g., AAPL;5 or X:BTCUSD;0,5)
+            $portfolio[] = array(
+                'ticker' => trim($data[0]),
+                'amount' => (float)str_replace(',', '.', trim($data[1]))
             );
         }
         fclose($handle);
@@ -34,19 +38,34 @@ function fetchStockData($ticker, $apiKey) {
     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0); // Disable SSL host verification (use only if necessary)
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0); // Disable SSL peer verification (use only if necessary)
 
-    // Execute cURL request
-    $response = curl_exec($ch);
+    // Execute cURL request, retrying when the free tier rate limit (5 calls/minute) is hit
+    for ($attempt = 1; $attempt <= 3; $attempt++) {
+        $response = curl_exec($ch);
 
-    // Check for cURL errors
-    if (curl_errno($ch)) {
-        // Log error to STDERR
-        fwrite(STDERR, date('Y-m-d H:i:s') . " ERROR: Failed to fetch data for ticker {$ticker}. cURL Error: " . curl_error($ch) . "\n");
-        curl_close($ch);
-        return null;
+        // Check for cURL errors
+        if (curl_errno($ch)) {
+            // Log error to STDERR
+            fwrite(STDERR, date('Y-m-d H:i:s') . " ERROR: Failed to fetch data for ticker {$ticker}. cURL Error: " . curl_error($ch) . "\n");
+            curl_close($ch);
+            return null;
+        }
+
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        if ($httpCode != 429) {
+            break;
+        }
+
+        fwrite(STDERR, date('Y-m-d H:i:s') . " WARN: Rate limited on {$ticker} (attempt {$attempt}), waiting 60 seconds\n");
+        sleep(60);
     }
 
     // Close cURL session
     curl_close($ch);
+
+    if ($httpCode != 200) {
+        fwrite(STDERR, date('Y-m-d H:i:s') . " ERROR: HTTP {$httpCode} for ticker {$ticker}: " . substr($response, 0, 200) . "\n");
+        return null;
+    }
 
     // Decode the JSON response
     $data = json_decode($response, true);
@@ -101,12 +120,17 @@ function calculateDailyPriceGains($portfolio, $apiKey, $yesterdayPrices) {
                 // No data from yesterday (new stock in portfolio)
                 fwrite(STDERR, date('Y-m-d H:i:s') . " INFO: Ticker: {$ticker} is new in the portfolio. Today's price: \${$todayPrice}\n");
             }
-
-            // Sleep for 20 seconds to respect API limits
-            sleep(20);
         } else {
             fwrite(STDERR, date('Y-m-d H:i:s') . " ERROR: Could not fetch price for {$ticker}\n");
+
+            // Keep yesterday's price so tomorrow still has something to compare against
+            if (isset($yesterdayPrices[$ticker])) {
+                $todayPrices[$ticker] = $yesterdayPrices[$ticker];
+            }
         }
+
+        // Sleep 13 seconds after every call (success or failure) to stay under 5 calls/minute
+        sleep(13);
     }
 
     return array($totalGain, $todayPrices);
